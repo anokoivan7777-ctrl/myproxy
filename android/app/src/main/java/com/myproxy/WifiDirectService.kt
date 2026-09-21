@@ -71,30 +71,37 @@ class WifiDirectService : Service() {
             return
         }
 
-        manager = getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
-        channel = manager!!.initialize(this, Looper.getMainLooper(), null)
+        val mgr = getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
+        val ch = mgr.initialize(this, Looper.getMainLooper(), null)
+        if (ch == null) {
+            ProxyState.log("Wi-Fi Direct недоступен на этом устройстве")
+            ProxyState.status = "Ошибка Wi-Fi Direct"
+            return
+        }
+        manager = mgr
+        channel = ch
 
         // Сначала убираем старую группу, потом создаём свою
-        manager!!.removeGroup(channel, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() { createGroup() }
-            override fun onFailure(reason: Int) { createGroup() }
+        mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() { createGroup(mgr, ch) }
+            override fun onFailure(reason: Int) { createGroup(mgr, ch) }
         })
     }
 
-    private fun createGroup() {
+    private fun createGroup(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
         val config = WifiP2pConfig.Builder()
             .setNetworkName(ProxyState.ssid)
             .setPassphrase(ProxyState.password)
             .enablePersistentMode(false)
             .build()
 
-        manager!!.createGroup(channel, config, object : WifiP2pManager.ActionListener {
+        mgr.createGroup(ch, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 ProxyState.running = true
                 ProxyState.status = "Подключено. Ждём ПК"
                 ProxyState.log("Группа создана: ${ProxyState.ssid}")
                 ProxyState.log("Адрес телефона: 192.168.49.1:$PORT")
-                startStats()
+                startStats(mgr, ch)
             }
 
             override fun onFailure(reason: Int) {
@@ -104,7 +111,7 @@ class WifiDirectService : Service() {
         })
     }
 
-    private fun startStats() {
+    private fun startStats(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
         handler.post(object : Runnable {
             override fun run() {
                 val s = socks ?: return
@@ -114,7 +121,7 @@ class WifiDirectService : Service() {
                 ProxyState.speedUp = "${(u - lastUp) / 1024} KB/s"
                 lastDown = d
                 lastUp = u
-                manager?.requestGroupInfo(channel) { g ->
+                mgr.requestGroupInfo(ch) { g ->
                     ProxyState.clients = g?.clientList?.size ?: 0
                 }
                 handler.postDelayed(this, 1000)
@@ -126,7 +133,11 @@ class WifiDirectService : Service() {
         handler.removeCallbacksAndMessages(null)
         socks?.stop()
         socks = null
-        manager?.removeGroup(channel, null)
+        val mgr = manager
+        val ch = channel
+        if (mgr != null && ch != null) {
+            mgr.removeGroup(ch, null)
+        }
         ProxyState.running = false
         ProxyState.status = "Отключено"
         ProxyState.clients = 0
