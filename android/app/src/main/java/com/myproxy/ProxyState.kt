@@ -16,8 +16,9 @@ object ProxyState {
     var speedUp by mutableStateOf("0 KB/s")
     val logLines = mutableStateListOf<String>()
 
+    @Synchronized
     fun log(msg: String) {
         logLines.add(0, msg)
-        if (logLines.size > 100) logLines.removeAt(logLines.size - 1)
+        while (logLines.size > 30) logLines.removeAt(logLines.size - 1)
     }
 }
