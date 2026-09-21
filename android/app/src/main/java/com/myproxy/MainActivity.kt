@@ -3,6 +3,7 @@ package com.myproxy
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
@@ -31,7 +32,7 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             val denied = result.filterValues { !it }.keys
-            if (denied.isEmpty()) ProxyState.log("Разрешения выданы")
+            if (denied.isEmpty()) ProxyState.log("Разрешения выданы. Нажмите «Подключить» ещё раз")
             else ProxyState.log("Не выданы: " + denied.joinToString { it.substringAfterLast('.') })
         }
 
@@ -61,15 +62,30 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onConnectClicked() {
+        if (ProxyState.running) {
+            startService(
+                Intent(this, WifiDirectService::class.java)
+                    .setAction(WifiDirectService.ACTION_STOP)
+            )
+            return
+        }
         if (!isLocationEnabled()) {
             ProxyState.log("Включите геолокацию в шторке телефона")
             startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
             return
         }
-        permissionLauncher.launch(requiredPermissions())
+        val missing = requiredPermissions().any {
+            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing) {
+            permissionLauncher.launch(requiredPermissions())
+            return
+        }
         requestBatteryExemption()
-        // Шаг 3: здесь будет запуск WifiDirectService
-        ProxyState.log("Сервис будет добавлен в шаге 3")
+        startForegroundService(
+            Intent(this, WifiDirectService::class.java)
+                .setAction(WifiDirectService.ACTION_START)
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
