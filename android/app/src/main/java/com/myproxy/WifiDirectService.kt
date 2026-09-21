@@ -88,10 +88,11 @@ class WifiDirectService : Service() {
         })
     }
 
-    private fun createGroup(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
+        private fun createGroup(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
         val config = WifiP2pConfig.Builder()
             .setNetworkName(ProxyState.ssid)
             .setPassphrase(ProxyState.password)
+            .setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ)
             .enablePersistentMode(false)
             .build()
 
@@ -99,7 +100,7 @@ class WifiDirectService : Service() {
             override fun onSuccess() {
                 ProxyState.running = true
                 ProxyState.status = "Подключено. Ждём ПК"
-                ProxyState.log("Группа создана: ${ProxyState.ssid}")
+                ProxyState.log("Группа создана: ${ProxyState.ssid} (2.4 ГГц)")
                 ProxyState.log("Адрес телефона: 192.168.49.1:$PORT")
                 startStats(mgr, ch)
             }
