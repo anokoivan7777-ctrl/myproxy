@@ -1,7 +1,11 @@
 package com.myproxy
 
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -9,7 +13,7 @@ import java.net.Socket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
-// Простой SOCKS5-сервер: только CONNECT (TCP), без авторизации
+// SOCKS5-сервер: CONNECT (TCP) и UDP ASSOCIATE (UDP), без авторизации
 class Socks5Server(private val port: Int) {
 
     private var server: ServerSocket? = null
@@ -50,17 +54,16 @@ class Socks5Server(private val port: Int) {
             if (cin.read() != 5) return
             val n = cin.read()
             if (n < 0) return
-            cin.skip(n.toLong())
+            readFully(cin, ByteArray(n))
             cout.write(byteArrayOf(5, 0)) // без авторизации
             cout.flush()
 
             // Запрос: VER, CMD, RSV, ATYP
             val head = ByteArray(4)
             readFully(cin, head)
-            if (head[0].toInt() != 5 || head[1].toInt() != 1) {
-                cout.write(byteArrayOf(5, 7, 0, 1, 0, 0, 0, 0, 0, 0))
-                return
-            }
+            if (head[0].toInt() != 5) return
+            val cmd = head[1].toInt()
+
             val host: String = when (head[3].toInt()) {
                 1 -> {
                     val b = ByteArray(4); readFully(cin, b)
@@ -68,6 +71,7 @@ class Socks5Server(private val port: Int) {
                 }
                 3 -> {
                     val len = cin.read()
+                    if (len < 0) return
                     val b = ByteArray(len); readFully(cin, b)
                     String(b)
                 }
@@ -80,23 +84,32 @@ class Socks5Server(private val port: Int) {
             val pb = ByteArray(2); readFully(cin, pb)
             val dstPort = ((pb[0].toInt() and 0xFF) shl 8) or (pb[1].toInt() and 0xFF)
 
-            try {
-                remote = Socket()
-                remote.connect(InetSocketAddress(host, dstPort), 10000)
-            } catch (e: Exception) {
-                cout.write(byteArrayOf(5, 4, 0, 1, 0, 0, 0, 0, 0, 0))
-                cout.flush()
-                return
-            }
-            cout.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0))
-            cout.flush()
+            when (cmd) {
+                1 -> { // CONNECT
+                    val r = Socket()
+                    remote = r
+                    try {
+                        r.connect(InetSocketAddress(host, dstPort), 10000)
+                    } catch (e: Exception) {
+                        cout.write(byteArrayOf(5, 4, 0, 1, 0, 0, 0, 0, 0, 0))
+                        cout.flush()
+                        return
+                    }
+                    cout.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+                    cout.flush()
 
-            client.soTimeout = 0
-            val r = remote
-            val t = Thread { pipe(cin, r.getOutputStream(), bytesUp) }
-            t.start()
-            pipe(r.getInputStream(), cout, bytesDown)
-            t.join(1000)
+                    client.soTimeout = 0
+                    val t = Thread { pipe(cin, r.getOutputStream(), bytesUp) }
+                    t.start()
+                    pipe(r.getInputStream(), cout, bytesDown)
+                    t.join(1000)
+                }
+                3 -> handleUdp(client, cin, cout) // UDP ASSOCIATE
+                else -> {
+                    cout.write(byteArrayOf(5, 7, 0, 1, 0, 0, 0, 0, 0, 0))
+                    cout.flush()
+                }
+            }
         } catch (_: Exception) {
         } finally {
             try { client.close() } catch (_: Exception) {}
@@ -104,11 +117,116 @@ class Socks5Server(private val port: Int) {
         }
     }
 
+    // UDP ASSOCIATE: открываем UDP-порт, клиент шлёт туда датаграммы с SOCKS-заголовком.
+    // Ассоциация живёт, пока открыто TCP-соединение.
+    private fun handleUdp(client: Socket, cin: InputStream, cout: OutputStream) {
+        val udp = DatagramSocket(0)
+        try {
+            client.soTimeout = 0
+
+            var localIp = client.localAddress.address
+            if (localIp.size != 4) localIp = byteArrayOf(192.toByte(), 168.toByte(), 49, 1)
+            val bindPort = udp.localPort
+            val reply = ByteArray(10)
+            reply[0] = 5; reply[1] = 0; reply[2] = 0; reply[3] = 1
+            System.arraycopy(localIp, 0, reply, 4, 4)
+            reply[8] = (bindPort shr 8).toByte()
+            reply[9] = bindPort.toByte()
+            cout.write(reply)
+            cout.flush()
+
+            // Когда TCP-соединение закрыто, закрываем и UDP
+            val watcher = Thread {
+                try { while (cin.read() >= 0) { /* ждём закрытия */ } } catch (_: Exception) {}
+                udp.close()
+            }
+            watcher.isDaemon = true
+            watcher.start()
+
+            val clientIp = client.inetAddress
+            var clientPort = -1
+            val buf = ByteArray(65535)
+
+            while (!udp.isClosed) {
+                val p = DatagramPacket(buf, buf.size)
+                udp.receive(p)
+                val data = p.data
+                val off = p.offset
+                val len = p.length
+
+                val fromClient = p.address == clientIp && (clientPort == -1 || p.port == clientPort)
+
+                if (fromClient) {
+                    clientPort = p.port
+                    // RSV(2) FRAG(1) ATYP(1) ADDR PORT DATA
+                    if (len < 10 || data[off + 2].toInt() != 0) continue
+                    var pos = off + 4
+                    val dest: InetAddress? = when (data[off + 3].toInt()) {
+                        1 -> {
+                            val b = data.copyOfRange(pos, pos + 4); pos += 4
+                            InetAddress.getByAddress(b)
+                        }
+                        4 -> {
+                            if (len < 22) continue
+                            val b = data.copyOfRange(pos, pos + 16); pos += 16
+                            InetAddress.getByAddress(b)
+                        }
+                        3 -> {
+                            val l = data[pos].toInt() and 0xFF
+                            val name = String(data, pos + 1, l)
+                            pos += 1 + l
+                            // имя разрешаем позже, в отдельном потоке
+                            val dp = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+                            pos += 2
+                            val payload = data.copyOfRange(pos, off + len)
+                            pool.execute {
+                                try {
+                                    val addr = InetAddress.getByName(name)
+                                    udp.send(DatagramPacket(payload, payload.size, addr, dp))
+                                    bytesUp.addAndGet(payload.size.toLong())
+                                } catch (_: Exception) {}
+                            }
+                            null
+                        }
+                        else -> null
+                    }
+                    if (dest != null) {
+                        val dp = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+                        pos += 2
+                        val payload = data.copyOfRange(pos, off + len)
+                        try {
+                            udp.send(DatagramPacket(payload, payload.size, dest, dp))
+                            bytesUp.addAndGet(payload.size.toLong())
+                        } catch (_: Exception) {}
+                    }
+                } else if (clientPort != -1) {
+                    // Ответ от удалённого узла: оборачиваем в SOCKS-заголовок и отдаём клиенту
+                    val addr = p.address.address
+                    val isV6 = p.address is Inet6Address
+                    val hdrLen = if (isV6) 22 else 10
+                    val out = ByteArray(hdrLen + len)
+                    out[3] = if (isV6) 4 else 1
+                    System.arraycopy(addr, 0, out, 4, addr.size)
+                    out[hdrLen - 2] = (p.port shr 8).toByte()
+                    out[hdrLen - 1] = p.port.toByte()
+                    System.arraycopy(data, off, out, hdrLen, len)
+                    try {
+                        udp.send(DatagramPacket(out, out.size, clientIp, clientPort))
+                        bytesDown.addAndGet(len.toLong())
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            udp.close()
+        }
+    }
+
     private fun readFully(i: InputStream, b: ByteArray) {
         var off = 0
         while (off < b.size) {
             val r = i.read(b, off, b.size - off)
-            if (r < 0) throw java.io.IOException("eof")
+            if (r < 0) throw IOException("eof")
             off += r
         }
     }
