@@ -50,15 +50,13 @@ class Socks5Server(private val port: Int) {
             val cin = client.getInputStream()
             val cout = client.getOutputStream()
 
-            // Приветствие: VER, NMETHODS, METHODS
             if (cin.read() != 5) return
             val n = cin.read()
             if (n < 0) return
             readFully(cin, ByteArray(n))
-            cout.write(byteArrayOf(5, 0)) // без авторизации
+            cout.write(byteArrayOf(5, 0))
             cout.flush()
 
-            // Запрос: VER, CMD, RSV, ATYP
             val head = ByteArray(4)
             readFully(cin, head)
             if (head[0].toInt() != 5) return
@@ -84,8 +82,10 @@ class Socks5Server(private val port: Int) {
             val pb = ByteArray(2); readFully(cin, pb)
             val dstPort = ((pb[0].toInt() and 0xFF) shl 8) or (pb[1].toInt() and 0xFF)
 
+            ProxyState.log("SOCKS cmd=$cmd host=$host:$dstPort от ${client.inetAddress}")
+
             when (cmd) {
-                1 -> { // CONNECT
+                1 -> {
                     val r = Socket()
                     remote = r
                     try {
@@ -104,21 +104,20 @@ class Socks5Server(private val port: Int) {
                     pipe(r.getInputStream(), cout, bytesDown)
                     t.join(1000)
                 }
-                3 -> handleUdp(client, cin, cout) // UDP ASSOCIATE
+                3 -> handleUdp(client, cin, cout)
                 else -> {
                     cout.write(byteArrayOf(5, 7, 0, 1, 0, 0, 0, 0, 0, 0))
                     cout.flush()
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            ProxyState.log("handle() ошибка: ${e.message}")
         } finally {
             try { client.close() } catch (_: Exception) {}
             try { remote?.close() } catch (_: Exception) {}
         }
     }
 
-    // UDP ASSOCIATE: открываем UDP-порт, клиент шлёт туда датаграммы с SOCKS-заголовком.
-    // Ассоциация живёт, пока открыто TCP-соединение.
     private fun handleUdp(client: Socket, cin: InputStream, cout: OutputStream) {
         val udp = DatagramSocket(0)
         try {
@@ -135,9 +134,11 @@ class Socks5Server(private val port: Int) {
             cout.write(reply)
             cout.flush()
 
-            // Когда TCP-соединение закрыто, закрываем и UDP
+            ProxyState.log("UDP: ассоциация открыта, relay-порт $bindPort, localIp=${localIp.joinToString(".") { (it.toInt() and 0xFF).toString() }}")
+
             val watcher = Thread {
-                try { while (cin.read() >= 0) { /* ждём закрытия */ } } catch (_: Exception) {}
+                try { while (cin.read() >= 0) { } } catch (_: Exception) {}
+                ProxyState.log("UDP: контрольное соединение закрыто, завершаю ассоциацию")
                 udp.close()
             }
             watcher.isDaemon = true
@@ -146,6 +147,7 @@ class Socks5Server(private val port: Int) {
             val clientIp = client.inetAddress
             var clientPort = -1
             val buf = ByteArray(65535)
+            var packets = 0
 
             while (!udp.isClosed) {
                 val p = DatagramPacket(buf, buf.size)
@@ -153,15 +155,22 @@ class Socks5Server(private val port: Int) {
                 val data = p.data
                 val off = p.offset
                 val len = p.length
+                packets++
+                if (packets <= 5) {
+                    ProxyState.log("UDP: пакет #$packets от ${p.address}:${p.port}, ${len} байт")
+                }
 
                 val fromClient = p.address == clientIp && (clientPort == -1 || p.port == clientPort)
 
                 if (fromClient) {
                     clientPort = p.port
-                    // RSV(2) FRAG(1) ATYP(1) ADDR PORT DATA
-                    if (len < 10 || data[off + 2].toInt() != 0) continue
+                    if (len < 10 || data[off + 2].toInt() != 0) {
+                        ProxyState.log("UDP: пакет от клиента отброшен (len=$len, frag=${data.getOrNull(off + 2)})")
+                        continue
+                    }
                     var pos = off + 4
-                    val dest: InetAddress? = when (data[off + 3].toInt()) {
+                    val atyp = data[off + 3].toInt()
+                    val dest: InetAddress? = when (atyp) {
                         1 -> {
                             val b = data.copyOfRange(pos, pos + 4); pos += 4
                             InetAddress.getByAddress(b)
@@ -175,7 +184,6 @@ class Socks5Server(private val port: Int) {
                             val l = data[pos].toInt() and 0xFF
                             val name = String(data, pos + 1, l)
                             pos += 1 + l
-                            // имя разрешаем позже, в отдельном потоке
                             val dp = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
                             pos += 2
                             val payload = data.copyOfRange(pos, off + len)
@@ -184,11 +192,16 @@ class Socks5Server(private val port: Int) {
                                     val addr = InetAddress.getByName(name)
                                     udp.send(DatagramPacket(payload, payload.size, addr, dp))
                                     bytesUp.addAndGet(payload.size.toLong())
-                                } catch (_: Exception) {}
+                                } catch (e: Exception) {
+                                    ProxyState.log("UDP: ошибка резолва $name: ${e.message}")
+                                }
                             }
                             null
                         }
-                        else -> null
+                        else -> {
+                            ProxyState.log("UDP: неизвестный ATYP=$atyp")
+                            null
+                        }
                     }
                     if (dest != null) {
                         val dp = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
@@ -197,10 +210,11 @@ class Socks5Server(private val port: Int) {
                         try {
                             udp.send(DatagramPacket(payload, payload.size, dest, dp))
                             bytesUp.addAndGet(payload.size.toLong())
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            ProxyState.log("UDP: ошибка отправки к $dest:$dp: ${e.message}")
+                        }
                     }
                 } else if (clientPort != -1) {
-                    // Ответ от удалённого узла: оборачиваем в SOCKS-заголовок и отдаём клиенту
                     val addr = p.address.address
                     val isV6 = p.address is Inet6Address
                     val hdrLen = if (isV6) 22 else 10
@@ -213,10 +227,15 @@ class Socks5Server(private val port: Int) {
                     try {
                         udp.send(DatagramPacket(out, out.size, clientIp, clientPort))
                         bytesDown.addAndGet(len.toLong())
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        ProxyState.log("UDP: ошибка ответа клиенту: ${e.message}")
+                    }
+                } else {
+                    ProxyState.log("UDP: пакет от ${p.address}, но клиент ещё неизвестен — игнор")
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            ProxyState.log("UDP: исключение ассоциации: ${e.message}")
         } finally {
             udp.close()
         }
