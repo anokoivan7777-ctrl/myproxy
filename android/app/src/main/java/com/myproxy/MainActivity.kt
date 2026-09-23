@@ -111,7 +111,7 @@ fun MainScreen(onConnect: () -> Unit) {
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("MyProxy", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+            Text("RyVox", fontSize = 26.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(16.dp))
 
             // Статус
