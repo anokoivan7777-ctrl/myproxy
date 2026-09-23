@@ -47,10 +47,10 @@ class WifiDirectService : Service() {
     private fun startForegroundNow() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "MyProxy", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL, "RyVox", NotificationManager.IMPORTANCE_LOW)
         )
         val n: Notification = NotificationCompat.Builder(this, CHANNEL)
-            .setContentTitle("MyProxy работает")
+            .setContentTitle("RyVox работает")
             .setContentText("Wi-Fi Direct, SOCKS5 порт $PORT")
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setOngoing(true)
