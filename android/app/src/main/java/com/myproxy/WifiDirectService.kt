@@ -23,6 +23,7 @@ class WifiDirectService : Service() {
         const val ACTION_STOP = "stop"
         const val PORT = 1080
         private const val CHANNEL = "myproxy"
+        private const val RECONNECT_COOLDOWN_MS = 5000L
     }
 
     private var manager: WifiP2pManager? = null
@@ -32,13 +33,19 @@ class WifiDirectService : Service() {
     private var lastDown = 0L
     private var lastUp = 0L
 
+    @Volatile private var shouldBeRunning = false
+    @Volatile private var recreating = false
+    private var lastRecreateAttempt = 0L
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            shouldBeRunning = false
             shutdown()
             return START_NOT_STICKY
         }
+        shouldBeRunning = true
         startForegroundNow()
         startAll()
         return START_STICKY
@@ -81,14 +88,13 @@ class WifiDirectService : Service() {
         manager = mgr
         channel = ch
 
-        // Сначала убираем старую группу, потом создаём свою
         mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
             override fun onSuccess() { createGroup(mgr, ch) }
             override fun onFailure(reason: Int) { createGroup(mgr, ch) }
         })
     }
 
-        private fun createGroup(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
+    private fun createGroup(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
         val config = WifiP2pConfig.Builder()
             .setNetworkName(ProxyState.ssid)
             .setPassphrase(ProxyState.password)
@@ -102,12 +108,14 @@ class WifiDirectService : Service() {
                 ProxyState.status = "Подключено. Ждём ПК"
                 ProxyState.log("Группа создана: ${ProxyState.ssid} (2.4 ГГц)")
                 ProxyState.log("Адрес телефона: 192.168.49.1:$PORT")
+                recreating = false
                 startStats(mgr, ch)
             }
 
             override fun onFailure(reason: Int) {
                 ProxyState.log("Ошибка группы, код $reason (2 = занято, 0 = ошибка)")
                 ProxyState.status = "Ошибка Wi-Fi Direct"
+                recreating = false
             }
         })
     }
@@ -115,18 +123,45 @@ class WifiDirectService : Service() {
     private fun startStats(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
         handler.post(object : Runnable {
             override fun run() {
-                val s = socks ?: return
-                val d = s.bytesDown.get()
-                val u = s.bytesUp.get()
-                ProxyState.speedDown = "${(d - lastDown) / 1024} KB/s"
-                ProxyState.speedUp = "${(u - lastUp) / 1024} KB/s"
-                lastDown = d
-                lastUp = u
-                mgr.requestGroupInfo(ch) { g ->
-                    ProxyState.clients = g?.clientList?.size ?: 0
+                if (!shouldBeRunning) return
+
+                val s = socks
+                if (s != null) {
+                    val d = s.bytesDown.get()
+                    val u = s.bytesUp.get()
+                    ProxyState.speedDown = "${(d - lastDown) / 1024} KB/s"
+                    ProxyState.speedUp = "${(u - lastUp) / 1024} KB/s"
+                    lastDown = d
+                    lastUp = u
                 }
+
+                mgr.requestGroupInfo(ch) { g ->
+                    if (g == null) {
+                        ProxyState.clients = 0
+                        maybeRecreate(mgr, ch, "группа исчезла")
+                    } else {
+                        ProxyState.clients = g.clientList?.size ?: 0
+                    }
+                }
+
                 handler.postDelayed(this, 1000)
             }
+        })
+    }
+
+    private fun maybeRecreate(mgr: WifiP2pManager, ch: WifiP2pManager.Channel, reason: String) {
+        if (!shouldBeRunning || recreating) return
+        val now = System.currentTimeMillis()
+        if (now - lastRecreateAttempt < RECONNECT_COOLDOWN_MS) return
+        lastRecreateAttempt = now
+        recreating = true
+
+        ProxyState.status = "Переподключение..."
+        ProxyState.log("Обрыв Wi-Fi Direct ($reason), пересоздаю группу")
+
+        mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() { createGroup(mgr, ch) }
+            override fun onFailure(reason: Int) { createGroup(mgr, ch) }
         })
     }
 
@@ -150,6 +185,7 @@ class WifiDirectService : Service() {
     }
 
     override fun onDestroy() {
+        shouldBeRunning = false
         handler.removeCallbacksAndMessages(null)
         socks?.stop()
         super.onDestroy()
