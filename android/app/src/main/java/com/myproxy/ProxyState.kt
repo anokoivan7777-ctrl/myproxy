@@ -9,7 +9,7 @@ import androidx.compose.runtime.setValue
 object ProxyState {
     var running by mutableStateOf(false)
     var status by mutableStateOf("Отключено")
-    var ssid by mutableStateOf("DIRECT-MP-MyProxy")
+    var ssid by mutableStateOf("DIRECT-RV-RyVox")
     var password by mutableStateOf("proxy12345")
     var clients by mutableStateOf(0)
     var speedDown by mutableStateOf("0 KB/s")
