@@ -3,7 +3,7 @@ package com.myproxy
 import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.content.SharedPreferences
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
@@ -20,6 +20,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -28,6 +32,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 class MainActivity : ComponentActivity() {
+
+    private lateinit var prefs: SharedPreferences
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -69,39 +75,61 @@ class MainActivity : ComponentActivity() {
             )
             return
         }
-        if (!isLocationEnabled()) {
+        if (ProxyState.mode == "wifi" && !isLocationEnabled()) {
             ProxyState.log("Включите геолокацию в шторке телефона")
             startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
             return
         }
         val missing = requiredPermissions().any {
-            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+            checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED
         }
         if (missing) {
             permissionLauncher.launch(requiredPermissions())
             return
         }
-        requestBatteryExemption()
+        if (ProxyState.mode == "wifi") requestBatteryExemption()
         startForegroundService(
             Intent(this, WifiDirectService::class.java)
                 .setAction(WifiDirectService.ACTION_START)
         )
     }
 
+    private fun savePassword(newPassword: String) {
+        if (newPassword.length < 8) {
+            ProxyState.log("Пароль должен быть не короче 8 символов")
+            return
+        }
+        ProxyState.password = newPassword
+        prefs.edit().putString("password", newPassword).apply()
+        ProxyState.log("Пароль сохранён, применится при следующем подключении")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        prefs = getSharedPreferences("myproxy", Context.MODE_PRIVATE)
+        ProxyState.password = prefs.getString("password", ProxyState.password) ?: ProxyState.password
+
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                MainScreen(onConnect = { onConnectClicked() })
+                MainScreen(
+                    onConnect = { onConnectClicked() },
+                    onModeChange = { newMode -> if (!ProxyState.running) ProxyState.mode = newMode },
+                    onSavePassword = { savePassword(it) }
+                )
             }
         }
     }
 }
 
 @Composable
-fun MainScreen(onConnect: () -> Unit) {
+fun MainScreen(
+    onConnect: () -> Unit,
+    onModeChange: (String) -> Unit,
+    onSavePassword: (String) -> Unit
+) {
     val green = Color(0xFF2E7D32)
     val red = Color(0xFFC62828)
+    var passwordField by remember { mutableStateOf(ProxyState.password) }
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -114,7 +142,6 @@ fun MainScreen(onConnect: () -> Unit) {
             Text("RyVox", fontSize = 26.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(16.dp))
 
-            // Статус
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -130,46 +157,69 @@ fun MainScreen(onConnect: () -> Unit) {
 
             Spacer(Modifier.height(16.dp))
 
-            // Кнопка Connect / Disconnect
             Button(
                 onClick = onConnect,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(64.dp),
+                modifier = Modifier.fillMaxWidth().height(64.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (ProxyState.running) red else green
                 )
             ) {
-                Text(
-                    if (ProxyState.running) "Отключить" else "Подключить",
-                    fontSize = 20.sp
-                )
+                Text(if (ProxyState.running) "Отключить" else "Подключить", fontSize = 20.sp)
             }
 
             Spacer(Modifier.height(16.dp))
 
-            // Режим
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {}) { Text("Wi-Fi Direct") }
-                OutlinedButton(onClick = {}, enabled = false) { Text("USB") }
+                Button(
+                    onClick = { onModeChange("wifi") },
+                    enabled = !ProxyState.running,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (ProxyState.mode == "wifi") Color(0xFFB39DDB) else Color(0xFF37474F)
+                    )
+                ) { Text("Wi-Fi Direct") }
+                Button(
+                    onClick = { onModeChange("usb") },
+                    enabled = !ProxyState.running,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (ProxyState.mode == "usb") Color(0xFFB39DDB) else Color(0xFF37474F)
+                    )
+                ) { Text("USB") }
             }
 
             Spacer(Modifier.height(16.dp))
 
-            // Данные сети
             Column(modifier = Modifier.fillMaxWidth()) {
-                Text("Сеть: ${ProxyState.ssid}")
-                Text("Пароль: ${ProxyState.password}")
-                Text("Клиентов: ${ProxyState.clients}")
+                if (ProxyState.mode == "wifi") {
+                    Text("Сеть: ${ProxyState.ssid}")
+                    Text("Пароль: ${ProxyState.password}")
+                    Text("Клиентов: ${ProxyState.clients}")
+                } else {
+                    Text("Режим: USB (кабель + отладка по USB)")
+                }
                 Text("Загрузка: ${ProxyState.speedDown}   Отдача: ${ProxyState.speedUp}")
+                Text("Всего: ↓ ${ProxyState.formatBytes(ProxyState.totalDown)}   ↑ ${ProxyState.formatBytes(ProxyState.totalUp)}")
             }
 
             Spacer(Modifier.height(16.dp))
+
+            if (ProxyState.mode == "wifi" && !ProxyState.running) {
+                Text("Сменить пароль сети (мин. 8 символов)", fontSize = 13.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = passwordField,
+                        onValueChange = { passwordField = it },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = { onSavePassword(passwordField) }) { Text("Сохранить") }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+
             Text("Лог", fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start))
             LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                items(ProxyState.logLines) { line ->
-                    Text(line, fontSize = 12.sp)
-                }
+                items(ProxyState.logLines) { line -> Text(line, fontSize = 12.sp) }
             }
         }
     }
