@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -21,6 +22,8 @@ class WifiDirectService : Service() {
     companion object {
         const val ACTION_START = "start"
         const val ACTION_STOP = "stop"
+        const val ACTION_TOGGLE = "toggle"
+        const val ACTION_EXIT = "exit"
         const val PORT = 1080
         private const val CHANNEL = "myproxy"
         private const val RECONNECT_COOLDOWN_MS = 5000L
@@ -40,15 +43,66 @@ class WifiDirectService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            shouldBeRunning = false
-            shutdown()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                shouldBeRunning = false
+                shutdown()
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE -> {
+                if (shouldBeRunning) {
+                    shouldBeRunning = false
+                    shutdown()
+                } else {
+                    shouldBeRunning = true
+                    startForegroundNow()
+                    startAll()
+                }
+                return START_STICKY
+            }
+            ACTION_EXIT -> {
+                shouldBeRunning = false
+                try { shutdown() } catch (_: Exception) {}
+                handler.postDelayed({
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                }, 300)
+                return START_NOT_STICKY
+            }
+            else -> {
+                shouldBeRunning = true
+                startForegroundNow()
+                startAll()
+                return START_STICKY
+            }
         }
-        shouldBeRunning = true
-        startForegroundNow()
-        startAll()
-        return START_STICKY
+    }
+
+    private fun buildNotification(): Notification {
+        val toggleIntent = Intent(this, WifiDirectService::class.java).setAction(ACTION_TOGGLE)
+        val togglePending = PendingIntent.getService(
+            this, 1, toggleIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val exitIntent = Intent(this, WifiDirectService::class.java).setAction(ACTION_EXIT)
+        val exitPending = PendingIntent.getService(
+            this, 2, exitIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val toggleLabel = if (shouldBeRunning) "Отключить" else "Подключить"
+
+        return NotificationCompat.Builder(this, CHANNEL)
+            .setContentTitle("RyVox")
+            .setContentText(ProxyState.status)
+            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setOngoing(true)
+            .addAction(0, toggleLabel, togglePending)
+            .addAction(0, "Выход", exitPending)
+            .build()
+    }
+
+    private fun updateNotification() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(1, buildNotification())
     }
 
     private fun startForegroundNow() {
@@ -56,18 +110,13 @@ class WifiDirectService : Service() {
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "RyVox", NotificationManager.IMPORTANCE_LOW)
         )
-        val n: Notification = NotificationCompat.Builder(this, CHANNEL)
-            .setContentTitle("RyVox работает")
-            .setContentText("Wi-Fi Direct, SOCKS5 порт $PORT")
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setOngoing(true)
-            .build()
-        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        startForeground(1, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
     }
 
     private fun startAll() {
         ProxyState.status = "Запуск..."
-        ProxyState.log("Запуск сервиса")
+        ProxyState.log("Запуск сервиса (${if (ProxyState.mode == "usb") "USB" else "Wi-Fi Direct"})")
+        updateNotification()
 
         try {
             socks = Socks5Server(PORT).also { it.start() }
@@ -75,6 +124,16 @@ class WifiDirectService : Service() {
         } catch (e: Exception) {
             ProxyState.log("Ошибка SOCKS5: ${e.message}")
             ProxyState.status = "Ошибка"
+            updateNotification()
+            return
+        }
+
+        if (ProxyState.mode == "usb") {
+            ProxyState.running = true
+            ProxyState.status = "Подключено (USB). Ждём ПК"
+            ProxyState.log("Подключите телефон к ПК кабелем и разрешите отладку по USB")
+            updateNotification()
+            startStatsUsb()
             return
         }
 
@@ -83,6 +142,7 @@ class WifiDirectService : Service() {
         if (ch == null) {
             ProxyState.log("Wi-Fi Direct недоступен на этом устройстве")
             ProxyState.status = "Ошибка Wi-Fi Direct"
+            updateNotification()
             return
         }
         manager = mgr
@@ -109,32 +169,38 @@ class WifiDirectService : Service() {
                 ProxyState.log("Группа создана: ${ProxyState.ssid} (2.4 ГГц)")
                 ProxyState.log("Адрес телефона: 192.168.49.1:$PORT")
                 recreating = false
-                startStats(mgr, ch)
+                updateNotification()
+                startStatsWifi(mgr, ch)
             }
 
             override fun onFailure(reason: Int) {
                 ProxyState.log("Ошибка группы, код $reason (2 = занято, 0 = ошибка)")
                 ProxyState.status = "Ошибка Wi-Fi Direct"
                 recreating = false
+                updateNotification()
             }
         })
     }
 
-    private fun startStats(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
+    private fun updateByteStats() {
+        val s = socks ?: return
+        val d = s.bytesDown.get()
+        val u = s.bytesUp.get()
+        val deltaDown = d - lastDown
+        val deltaUp = u - lastUp
+        ProxyState.speedDown = "${if (deltaDown > 0) deltaDown / 1024 else 0} KB/s"
+        ProxyState.speedUp = "${if (deltaUp > 0) deltaUp / 1024 else 0} KB/s"
+        if (deltaDown > 0) ProxyState.totalDown += deltaDown
+        if (deltaUp > 0) ProxyState.totalUp += deltaUp
+        lastDown = d
+        lastUp = u
+    }
+
+    private fun startStatsWifi(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
         handler.post(object : Runnable {
             override fun run() {
                 if (!shouldBeRunning) return
-
-                val s = socks
-                if (s != null) {
-                    val d = s.bytesDown.get()
-                    val u = s.bytesUp.get()
-                    ProxyState.speedDown = "${(d - lastDown) / 1024} KB/s"
-                    ProxyState.speedUp = "${(u - lastUp) / 1024} KB/s"
-                    lastDown = d
-                    lastUp = u
-                }
-
+                updateByteStats()
                 mgr.requestGroupInfo(ch) { g ->
                     if (g == null) {
                         ProxyState.clients = 0
@@ -143,7 +209,16 @@ class WifiDirectService : Service() {
                         ProxyState.clients = g.clientList?.size ?: 0
                     }
                 }
+                handler.postDelayed(this, 1000)
+            }
+        })
+    }
 
+    private fun startStatsUsb() {
+        handler.post(object : Runnable {
+            override fun run() {
+                if (!shouldBeRunning) return
+                updateByteStats()
                 handler.postDelayed(this, 1000)
             }
         })
@@ -158,6 +233,7 @@ class WifiDirectService : Service() {
 
         ProxyState.status = "Переподключение..."
         ProxyState.log("Обрыв Wi-Fi Direct ($reason), пересоздаю группу")
+        updateNotification()
 
         mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
             override fun onSuccess() { createGroup(mgr, ch) }
