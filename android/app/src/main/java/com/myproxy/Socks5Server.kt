@@ -20,6 +20,7 @@ class Socks5Server(private val port: Int) {
     private val pool = Executors.newCachedThreadPool()
     val bytesDown = AtomicLong(0)
     val bytesUp = AtomicLong(0)
+    val activeConnections = java.util.concurrent.atomic.AtomicInteger(0)
 
     fun start() {
         val s = ServerSocket()
@@ -45,6 +46,7 @@ class Socks5Server(private val port: Int) {
 
     private fun handle(client: Socket) {
         var remote: Socket? = null
+        activeConnections.incrementAndGet()
         try {
             client.soTimeout = 30000
             val cin = client.getInputStream()
@@ -108,13 +110,13 @@ class Socks5Server(private val port: Int) {
                     cout.flush()
                 }
             }
-        } catch (_: Exception) {
+                } catch (_: Exception) {
         } finally {
+            activeConnections.decrementAndGet()
             try { client.close() } catch (_: Exception) {}
             try { remote?.close() } catch (_: Exception) {}
         }
     }
-
     private fun handleUdp(client: Socket, cin: InputStream, cout: OutputStream) {
         val udp = DatagramSocket(0)
         try {
