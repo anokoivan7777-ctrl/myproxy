@@ -15,6 +15,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -130,18 +131,37 @@ fun MainScreen(
     val green = Color(0xFF2E7D32)
     val red = Color(0xFFC62828)
     var passwordField by remember { mutableStateOf(ProxyState.password) }
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
-                .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(16.dp)
         ) {
-            Text("RyVox", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "RyVox",
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+                Text(
+                    "Поддержка",
+                    fontSize = 13.sp,
+                    color = Color(0xFF80CBC4),
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .clickable {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/RyVoxApp"))
+                            context.startActivity(intent)
+                        }
+                )
+            }
             Spacer(Modifier.height(16.dp))
 
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -217,10 +237,19 @@ fun MainScreen(
                 Spacer(Modifier.height(16.dp))
             }
 
-            Text("Лог", fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start))
+                        Text("Лог", fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start))
             LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 items(ProxyState.logLines) { line -> Text(line, fontSize = 12.sp) }
             }
+            } // закрытие вложенной Column с CenterHorizontally
+
+            Text(
+                "Версия 1.0-apk",
+                fontSize = 12.sp,
+                color = Color(0xFF888888),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
         }
     }
 }
