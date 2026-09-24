@@ -194,6 +194,11 @@ class WifiDirectService : Service() {
         if (deltaUp > 0) ProxyState.totalUp += deltaUp
         lastDown = d
         lastUp = u
+
+        if (s.activeConnections.get() > 0 && ProxyState.status.contains("Ждём ПК")) {
+            ProxyState.status = "Подключено"
+            updateNotification()
+        }
     }
 
     private fun startStatsWifi(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
